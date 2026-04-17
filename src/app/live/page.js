@@ -22,33 +22,32 @@ export default function LivePage() {
     const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const host = window.location.host;
-    // api.tarjma.app is where the gateway lives via nginx
     const base = host.startsWith("app.") ? host.replace("app.", "api.") : host;
     return `${protocol}://${base}/api/ws/live?token=${encodeURIComponent(token || "")}`;
   }
 
-  // Downsample Float32 at sourceRate to Int16 at TARGET_SAMPLE_RATE
+  // Float32 [-1, 1] -> Int16 PCM, with proper clamping
   function downsampleAndQuantize(float32, sourceRate) {
+    let samples;
     if (sourceRate === TARGET_SAMPLE_RATE) {
-      const out = new Int16Array(float32.length);
-      for (let i = 0; i < float32.length; i++) {
-        const s = Math.max(-1, Math.min(1, float32[i]));
-        out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      samples = float32;
+    } else {
+      const ratio = sourceRate / TARGET_SAMPLE_RATE;
+      const outLen = Math.floor(float32.length / ratio);
+      samples = new Float32Array(outLen);
+      for (let i = 0; i < outLen; i++) {
+        const startIdx = Math.floor(i * ratio);
+        const endIdx = Math.min(Math.floor((i + 1) * ratio), float32.length);
+        let sum = 0;
+        for (let j = startIdx; j < endIdx; j++) sum += float32[j];
+        samples[i] = sum / Math.max(1, endIdx - startIdx);
       }
-      return out;
     }
-    const ratio = sourceRate / TARGET_SAMPLE_RATE;
-    const outLen = Math.floor(float32.length / ratio);
-    const out = new Int16Array(outLen);
-    for (let i = 0; i < outLen; i++) {
-      // Simple average downsampling over the window
-      const startIdx = Math.floor(i * ratio);
-      const endIdx = Math.min(Math.floor((i + 1) * ratio), float32.length);
-      let sum = 0;
-      for (let j = startIdx; j < endIdx; j++) sum += float32[j];
-      const avg = sum / Math.max(1, endIdx - startIdx);
-      const s = Math.max(-1, Math.min(1, avg));
-      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+
+    const out = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      out[i] = Math.round(s * 32767);
     }
     return out;
   }
@@ -56,12 +55,16 @@ export default function LivePage() {
   const startRecording = async () => {
     setError("");
     try {
+      // IMPORTANT: disable AGC/noise suppression/echo cancellation.
+      // Chrome's default mic pipeline clips speech into saturation before
+      // it reaches our Float32 samples, which breaks Whisper transcription.
       const s = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: TARGET_SAMPLE_RATE,
           channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
         },
       });
       stream.current = s;
@@ -73,7 +76,6 @@ export default function LivePage() {
       socket.onopen = async () => {
         setConnected(true);
 
-        // Set up Web Audio pipeline
         const ctx = new (window.AudioContext || window.webkitAudioContext)({
           sampleRate: TARGET_SAMPLE_RATE,
         });
@@ -81,14 +83,13 @@ export default function LivePage() {
 
         const source = ctx.createMediaStreamSource(s);
 
-        // Use ScriptProcessor for simplicity (works everywhere; deprecated but fine)
         const bufferSize = 4096;
         const processor = ctx.createScriptProcessor(bufferSize, 1, 1);
         worklet.current = processor;
 
         let batchBuffer = [];
         let batchSamples = 0;
-        const samplesPerBatch = TARGET_SAMPLE_RATE / 2; // 500ms @ 16kHz = 8000 samples
+        const samplesPerBatch = TARGET_SAMPLE_RATE / 2; // 500ms
 
         processor.onaudioprocess = (e) => {
           if (socket.readyState !== WebSocket.OPEN) return;
@@ -97,7 +98,6 @@ export default function LivePage() {
           batchSamples += input.length;
 
           if (batchSamples >= samplesPerBatch) {
-            // Concatenate buffered chunks
             const combined = new Float32Array(batchSamples);
             let offset = 0;
             for (const part of batchBuffer) {
@@ -107,7 +107,6 @@ export default function LivePage() {
             batchBuffer = [];
             batchSamples = 0;
 
-            // Convert to Int16 PCM
             const pcm = downsampleAndQuantize(combined, ctx.sampleRate);
             socket.send(pcm.buffer);
           }
