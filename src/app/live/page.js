@@ -1,132 +1,281 @@
-'use client';
-import { useState, useRef, useEffect } from 'react';
-import api from '@/lib/api';
+"use client";
+
+import { useState, useRef } from "react";
 
 export default function LivePage() {
   const [recording, setRecording] = useState(false);
   const [connected, setConnected] = useState(false);
   const [transcript, setTranscript] = useState([]);
-  const [current, setCurrent] = useState('');
-  const [error, setError] = useState('');
+  const [current, setCurrent] = useState("");
+  const [error, setError] = useState("");
   const [duration, setDuration] = useState(0);
+
   const ws = useRef(null);
-  const recorder = useRef(null);
+  const audioCtx = useRef(null);
   const stream = useRef(null);
-  const endRef = useRef(null);
+  const worklet = useRef(null);
   const timer = useRef(null);
 
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [transcript, current]);
-  useEffect(() => () => { stopRecording(); if (timer.current) clearInterval(timer.current); }, []);
+  const TARGET_SAMPLE_RATE = 16000;
 
-  const fmt = (s) => `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+  function getWsUrl() {
+    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const host = window.location.host;
+    // api.tarjma.app is where the gateway lives via nginx
+    const base = host.startsWith("app.") ? host.replace("app.", "api.") : host;
+    return `${protocol}://${base}/api/ws/live?token=${encodeURIComponent(token || "")}`;
+  }
 
-  const getFreshToken = async () => {
-    // Try to refresh token first to ensure it's valid
-    try {
-      api.loadTokens();
-      if (api.refreshToken) {
-        await api.refresh();
+  // Downsample Float32 at sourceRate to Int16 at TARGET_SAMPLE_RATE
+  function downsampleAndQuantize(float32, sourceRate) {
+    if (sourceRate === TARGET_SAMPLE_RATE) {
+      const out = new Int16Array(float32.length);
+      for (let i = 0; i < float32.length; i++) {
+        const s = Math.max(-1, Math.min(1, float32[i]));
+        out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
       }
-      return api.token;
-    } catch {
-      return typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+      return out;
+    }
+    const ratio = sourceRate / TARGET_SAMPLE_RATE;
+    const outLen = Math.floor(float32.length / ratio);
+    const out = new Int16Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+      // Simple average downsampling over the window
+      const startIdx = Math.floor(i * ratio);
+      const endIdx = Math.min(Math.floor((i + 1) * ratio), float32.length);
+      let sum = 0;
+      for (let j = startIdx; j < endIdx; j++) sum += float32[j];
+      const avg = sum / Math.max(1, endIdx - startIdx);
+      const s = Math.max(-1, Math.min(1, avg));
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return out;
+  }
+
+  const startRecording = async () => {
+    setError("");
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: TARGET_SAMPLE_RATE,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
+      stream.current = s;
+
+      const socket = new WebSocket(getWsUrl());
+      socket.binaryType = "arraybuffer";
+      ws.current = socket;
+
+      socket.onopen = async () => {
+        setConnected(true);
+
+        // Set up Web Audio pipeline
+        const ctx = new (window.AudioContext || window.webkitAudioContext)({
+          sampleRate: TARGET_SAMPLE_RATE,
+        });
+        audioCtx.current = ctx;
+
+        const source = ctx.createMediaStreamSource(s);
+
+        // Use ScriptProcessor for simplicity (works everywhere; deprecated but fine)
+        const bufferSize = 4096;
+        const processor = ctx.createScriptProcessor(bufferSize, 1, 1);
+        worklet.current = processor;
+
+        let batchBuffer = [];
+        let batchSamples = 0;
+        const samplesPerBatch = TARGET_SAMPLE_RATE / 2; // 500ms @ 16kHz = 8000 samples
+
+        processor.onaudioprocess = (e) => {
+          if (socket.readyState !== WebSocket.OPEN) return;
+          const input = e.inputBuffer.getChannelData(0);
+          batchBuffer.push(new Float32Array(input));
+          batchSamples += input.length;
+
+          if (batchSamples >= samplesPerBatch) {
+            // Concatenate buffered chunks
+            const combined = new Float32Array(batchSamples);
+            let offset = 0;
+            for (const part of batchBuffer) {
+              combined.set(part, offset);
+              offset += part.length;
+            }
+            batchBuffer = [];
+            batchSamples = 0;
+
+            // Convert to Int16 PCM
+            const pcm = downsampleAndQuantize(combined, ctx.sampleRate);
+            socket.send(pcm.buffer);
+          }
+        };
+
+        source.connect(processor);
+        processor.connect(ctx.destination);
+
+        setRecording(true);
+        setDuration(0);
+        timer.current = setInterval(() => setDuration((d) => d + 1), 1000);
+      };
+
+      socket.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.type === "partial") setCurrent(data.text || "");
+          else if (data.type === "final") {
+            if (data.text?.trim()) {
+              setTranscript((p) => [
+                ...p,
+                { text: data.text, time: new Date().toLocaleTimeString() },
+              ]);
+            }
+            setCurrent("");
+          } else if (data.type === "error") {
+            setError(data.message || "Error");
+          }
+        } catch {}
+      };
+      socket.onerror = () => {
+        setError("WebSocket connection failed");
+        stopRecording();
+      };
+      socket.onclose = () => {
+        setConnected(false);
+        setRecording(false);
+      };
+    } catch (err) {
+      setError("Microphone access denied. Please allow microphone access in your browser.");
     }
   };
 
   const stopRecording = () => {
-    recorder.current?.stop();
-    stream.current?.getTracks().forEach(t => t.stop());
-    ws.current?.close();
-    if (timer.current) clearInterval(timer.current);
+    if (timer.current) {
+      clearInterval(timer.current);
+      timer.current = null;
+    }
+    if (worklet.current) {
+      try {
+        worklet.current.disconnect();
+      } catch {}
+      worklet.current = null;
+    }
+    if (audioCtx.current) {
+      audioCtx.current.close().catch(() => {});
+      audioCtx.current = null;
+    }
+    if (stream.current) {
+      stream.current.getTracks().forEach((t) => t.stop());
+      stream.current = null;
+    }
+    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+      try {
+        ws.current.send(JSON.stringify({ type: "end" }));
+      } catch {}
+      ws.current.close();
+    }
     setRecording(false);
     setConnected(false);
   };
 
-  const startRecording = async () => {
-    setError('');
-    try {
-      // Refresh token before connecting
-      const token = await getFreshToken();
-      if (!token) {
-        setError('Not authenticated. Please log in again.');
-        return;
-      }
-
-      const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-      const wsUrl = `wss://${host}/api/ws/live?token=${token}`;
-
-      const s = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true } });
-      stream.current = s;
-      const socket = new WebSocket(wsUrl);
-      ws.current = socket;
-      socket.onopen = () => {
-        setConnected(true);
-        const mr = new MediaRecorder(s, { mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm' });
-        recorder.current = mr;
-        mr.ondataavailable = (e) => { if (e.data.size > 0 && socket.readyState === WebSocket.OPEN) socket.send(e.data); };
-        mr.start(500);
-        setRecording(true);
-        setDuration(0);
-        timer.current = setInterval(() => setDuration(d => d + 1), 1000);
-      };
-      socket.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (data.type === 'partial') setCurrent(data.text || '');
-          else if (data.type === 'final') {
-            if (data.text?.trim()) setTranscript(p => [...p, { text: data.text, time: new Date().toLocaleTimeString() }]);
-            setCurrent('');
-          } else if (data.type === 'error') setError(data.message || 'Error');
-        } catch {}
-      };
-      socket.onerror = () => { setError('WebSocket connection failed'); stopRecording(); };
-      socket.onclose = (e) => {
-        setConnected(false);
-        setRecording(false);
-        if (e.code === 4001) setError('Session expired. Please refresh the page and try again.');
-      };
-    } catch (err) {
-      setError('Microphone access denied. Please allow microphone access in your browser.');
-    }
+  const formatDuration = (s) => {
+    const m = Math.floor(s / 60);
+    const ss = s % 60;
+    return `${m}:${ss.toString().padStart(2, "0")}`;
   };
 
   return (
-    <div style={{ padding: 32, maxWidth: 800, margin: '0 auto' }}>
+    <div style={{ padding: 32, maxWidth: 800, margin: "0 auto" }}>
       <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 8 }}>Live Transcription</h1>
-      <p style={{ color: '#888', marginBottom: 24 }}>Speak into your microphone for real-time Arabic transcription.</p>
+      <p style={{ color: "#888", marginBottom: 24 }}>
+        Speak into your microphone for real-time Arabic transcription.
+      </p>
 
-      {error && <div style={{ background: '#fee', border: '1px solid #fcc', borderRadius: 8, padding: '12px 16px', marginBottom: 16, color: '#c00' }}>{error}</div>}
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24 }}>
-        <button
-          onClick={recording ? stopRecording : startRecording}
-          style={{ padding: '12px 28px', borderRadius: 8, border: 'none', background: recording ? '#dc2626' : '#7c3aed', color: '#fff', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}
+      {error && (
+        <div
+          style={{
+            background: "#fee",
+            border: "1px solid #fcc",
+            borderRadius: 8,
+            padding: "12px 16px",
+            marginBottom: 16,
+            color: "#c00",
+          }}
         >
-          {recording ? '⏹ Stop' : '🎤 Start Recording'}
-        </button>
-        {recording && <span style={{ color: '#888', fontSize: 14 }}>{fmt(duration)} · {connected ? '🟢 Connected' : '🔴 Connecting...'}</span>}
-      </div>
-
-      <div style={{ background: '#0a0a0a', border: '1px solid #222', borderRadius: 12, padding: 24, minHeight: 300, maxHeight: 500, overflowY: 'auto' }}>
-        {transcript.length === 0 && !current && (
-          <p style={{ color: '#555', textAlign: 'center', marginTop: 80 }}>Transcription will appear here...</p>
-        )}
-        {transcript.map((t, i) => (
-          <div key={i} style={{ marginBottom: 12 }}>
-            <span style={{ color: '#555', fontSize: 11, marginRight: 8 }}>{t.time}</span>
-            <span style={{ color: '#e2e8f0', fontSize: 15, direction: 'rtl' }}>{t.text}</span>
-          </div>
-        ))}
-        {current && <div style={{ color: '#7c3aed', fontSize: 15, fontStyle: 'italic', direction: 'rtl' }}>{current}</div>}
-        <div ref={endRef} />
-      </div>
-
-      {transcript.length > 0 && (
-        <div style={{ marginTop: 16, display: 'flex', gap: 12 }}>
-          <button onClick={() => { setTranscript([]); setCurrent(''); }} style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #333', background: 'transparent', color: '#888', cursor: 'pointer' }}>Clear</button>
-          <button onClick={() => navigator.clipboard.writeText(transcript.map(t => t.text).join('\n'))} style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #7c3aed', background: 'transparent', color: '#7c3aed', cursor: 'pointer' }}>Copy All</button>
+          {error}
         </div>
       )}
+
+      <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 24 }}>
+        {!recording ? (
+          <button
+            onClick={startRecording}
+            style={{
+              padding: "10px 20px",
+              background: "#0070f3",
+              color: "white",
+              border: "none",
+              borderRadius: 8,
+              cursor: "pointer",
+              fontSize: 16,
+            }}
+          >
+            Start Recording
+          </button>
+        ) : (
+          <button
+            onClick={stopRecording}
+            style={{
+              padding: "10px 20px",
+              background: "#dc3545",
+              color: "white",
+              border: "none",
+              borderRadius: 8,
+              cursor: "pointer",
+              fontSize: 16,
+            }}
+          >
+            Stop Recording
+          </button>
+        )}
+        {recording && <span style={{ color: "#888" }}>🔴 {formatDuration(duration)}</span>}
+        {connected && !recording && <span style={{ color: "#0a0" }}>Connected</span>}
+      </div>
+
+      {current && (
+        <div
+          style={{
+            background: "#f5f5f5",
+            padding: 16,
+            borderRadius: 8,
+            marginBottom: 16,
+            fontStyle: "italic",
+            color: "#666",
+          }}
+        >
+          {current}
+        </div>
+      )}
+
+      <div>
+        {transcript.map((t, i) => (
+          <div
+            key={i}
+            style={{
+              padding: 12,
+              background: "#fafafa",
+              border: "1px solid #eee",
+              borderRadius: 8,
+              marginBottom: 8,
+            }}
+          >
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>{t.time}</div>
+            <div>{t.text}</div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
