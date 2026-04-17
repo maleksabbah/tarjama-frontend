@@ -3,6 +3,35 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import api from '@/lib/api';
 
+// Order of pipeline stages. Backend statuses map to stage keys below.
+const STAGES = [
+  { key: 'extracting', label: 'Extracting audio' },
+  { key: 'transcribing', label: 'Transcribing' },
+  { key: 'subtitling', label: 'Generating subtitles' },
+  { key: 'burning', label: 'Burning subtitles' },
+];
+
+// Map every possible backend status to a stage key (or null = pre-pipeline)
+const STATUS_TO_STAGE = {
+  queued: null,
+  pending: null,
+  processing: 'transcribing', // generic "processing" defaults to transcribing
+  extracting: 'extracting',
+  extract: 'extracting',
+  transcribing: 'transcribing',
+  transcribe: 'transcribing',
+  subtitling: 'subtitling',
+  subtitle: 'subtitling',
+  generating_subtitles: 'subtitling',
+  burning: 'burning',
+  burn: 'burning',
+  burning_subtitles: 'burning',
+  completed: 'completed',
+  done: 'completed',
+  failed: 'failed',
+  cancelled: 'cancelled',
+};
+
 export default function JobDetailPage() {
   const { id } = useParams();
   const router = useRouter();
@@ -17,7 +46,8 @@ export default function JobDetailPage() {
       const j = await api.getJob(id);
       setJob(j);
 
-      if (['processing', 'queued', 'pending'].includes(j.status)) {
+      const active = !['completed', 'done', 'failed', 'cancelled'].includes(j.status);
+      if (active) {
         try { setProgress(await api.getProgress(id)); } catch {}
       }
 
@@ -37,7 +67,7 @@ export default function JobDetailPage() {
 
   useEffect(() => {
     fetchJob();
-    intervalRef.current = setInterval(fetchJob, 3000);
+    intervalRef.current = setInterval(fetchJob, 2000);
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [fetchJob]);
 
@@ -58,6 +88,10 @@ export default function JobDetailPage() {
     queued: { color: 'text-amber-500', label: 'Queued' },
     pending: { color: 'text-amber-500', label: 'Pending' },
     processing: { color: 'text-brand-400', label: 'Processing' },
+    extracting: { color: 'text-brand-400', label: 'Extracting' },
+    transcribing: { color: 'text-brand-400', label: 'Transcribing' },
+    subtitling: { color: 'text-brand-400', label: 'Generating subtitles' },
+    burning: { color: 'text-brand-400', label: 'Burning subtitles' },
     completed: { color: 'text-emerald-500', label: 'Completed' },
     done: { color: 'text-emerald-500', label: 'Completed' },
     failed: { color: 'text-red-400', label: 'Failed' },
@@ -65,7 +99,44 @@ export default function JobDetailPage() {
   };
 
   const st = job ? (statusMap[job.status] || statusMap.queued) : statusMap.queued;
-  const pct = progress?.percentage || progress?.progress || 0;
+
+  // Figure out where we are in the pipeline
+  const currentStageKey = job
+    ? (STATUS_TO_STAGE[job.status] ?? STATUS_TO_STAGE[progress?.stage] ?? null)
+    : null;
+  const currentStageIdx = STAGES.findIndex(s => s.key === currentStageKey);
+  const isDone = currentStageKey === 'completed';
+  const isFailed = currentStageKey === 'failed';
+
+  // Percentage for the currently active stage only
+  const activePct = (() => {
+    const p = progress?.percentage ?? progress?.progress ?? progress?.pct;
+    if (typeof p === 'number') return Math.max(0, Math.min(100, Math.round(p)));
+    if (progress?.chunks_total > 0) {
+      return Math.round((progress.chunks_done / progress.chunks_total) * 100);
+    }
+    return 0;
+  })();
+
+  // Decide per-stage percentage: earlier stages = 100, current = activePct, future = 0
+  const stagePct = (idx) => {
+    if (isDone) return 100;
+    if (isFailed && idx > currentStageIdx) return 0;
+    if (currentStageIdx < 0) return 0; // queued, nothing active yet
+    if (idx < currentStageIdx) return 100;
+    if (idx === currentStageIdx) return activePct;
+    return 0;
+  };
+
+  const stageState = (idx) => {
+    if (isDone) return 'done';
+    if (isFailed && idx === currentStageIdx) return 'failed';
+    if (idx < currentStageIdx) return 'done';
+    if (idx === currentStageIdx) return 'active';
+    return 'pending';
+  };
+
+  const isProcessing = job && !['completed', 'done', 'failed', 'cancelled'].includes(job.status);
 
   return (
     <div className="animate-fade-in">
@@ -89,7 +160,7 @@ export default function JobDetailPage() {
                 )}
               </div>
             </div>
-            {['processing', 'queued', 'pending'].includes(job.status) && (
+            {isProcessing && (
               <button onClick={handleCancel}
                 className="flex items-center gap-1.5 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-[13px] hover:bg-red-500/20 transition-colors">
                 <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
@@ -100,24 +171,71 @@ export default function JobDetailPage() {
             )}
           </div>
 
-          {/* Progress Bar */}
-          {['processing', 'queued', 'pending'].includes(job.status) && (
+          {/* Per-stage progress bars */}
+          {(isProcessing || isDone || isFailed) && (
             <div className="bg-surface-card border border-line rounded-xl p-6 mb-5">
-              <div className="flex justify-between mb-3">
-                <span className="text-sm font-semibold">
-                  {progress?.stage || progress?.current_stage || 'Waiting...'}
-                </span>
-                <span className="text-sm font-mono text-brand-400">{pct}%</span>
+              <div className="flex flex-col gap-5">
+                {STAGES.map((stage, idx) => {
+                  const state = stageState(idx);
+                  const pct = stagePct(idx);
+                  const labelColor = {
+                    done: 'text-emerald-500',
+                    active: 'text-brand-400',
+                    failed: 'text-red-400',
+                    pending: 'text-muted',
+                  }[state];
+                  const barColor = {
+                    done: 'bg-emerald-500',
+                    active: 'bg-gradient-to-r from-brand-500 to-brand-400',
+                    failed: 'bg-red-500',
+                    pending: 'bg-line',
+                  }[state];
+
+                  return (
+                    <div key={stage.key}>
+                      <div className="flex justify-between items-center mb-2">
+                        <div className="flex items-center gap-2">
+                          {/* Status icon */}
+                          {state === 'done' && (
+                            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24" className="text-emerald-500">
+                              <path d="M20 6L9 17l-5-5" />
+                            </svg>
+                          )}
+                          {state === 'active' && (
+                            <div className="w-3 h-3 rounded-full bg-brand-400 animate-pulse" />
+                          )}
+                          {state === 'failed' && (
+                            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24" className="text-red-400">
+                              <path d="M18 6L6 18M6 6l12 12" />
+                            </svg>
+                          )}
+                          {state === 'pending' && (
+                            <div className="w-3 h-3 rounded-full border-2 border-line" />
+                          )}
+                          <span className={`text-[13px] font-semibold ${labelColor}`}>
+                            {stage.label}
+                          </span>
+                        </div>
+                        <span className={`text-[13px] font-mono ${labelColor}`}>
+                          {state === 'pending' ? '—' : `${pct}%`}
+                        </span>
+                      </div>
+                      <div className="h-1.5 bg-surface rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full transition-all duration-700 ${barColor}`}
+                          style={{ width: `${pct}%` }} />
+                      </div>
+
+                      {/* Show chunk count only under the currently active transcribing stage */}
+                      {state === 'active' && stage.key === 'transcribing'
+                        && progress?.chunks_done !== undefined && (
+                        <div className="text-xs text-muted mt-2">
+                          {progress.chunks_done} / {progress.chunks_total || '?'} chunks processed
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
-              <div className="h-1.5 bg-surface rounded-full overflow-hidden">
-                <div className="h-full rounded-full progress-bar transition-all duration-700"
-                  style={{ width: `${pct}%` }} />
-              </div>
-              {progress?.chunks_done !== undefined && (
-                <div className="text-xs text-muted mt-2">
-                  {progress.chunks_done} / {progress.chunks_total || '?'} chunks processed
-                </div>
-              )}
             </div>
           )}
 
@@ -152,7 +270,7 @@ export default function JobDetailPage() {
           )}
 
           {/* Error state */}
-          {job.status === 'failed' && (
+          {isFailed && (
             <div className="mt-4 px-4 py-3.5 bg-red-500/[0.08] border border-red-500/20 rounded-xl text-red-400 text-[13px]">
               {job.error || 'Job failed — check service logs for details'}
             </div>
