@@ -3,7 +3,6 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import api from '@/lib/api';
 
-// Order of pipeline stages. Backend statuses map to stage keys below.
 const STAGES = [
   { key: 'extracting', label: 'Extracting audio' },
   { key: 'transcribing', label: 'Transcribing' },
@@ -11,11 +10,10 @@ const STAGES = [
   { key: 'burning', label: 'Burning subtitles' },
 ];
 
-// Map every possible backend status to a stage key (or null = pre-pipeline)
 const STATUS_TO_STAGE = {
   queued: null,
   pending: null,
-  processing: 'transcribing', // generic "processing" defaults to transcribing
+  processing: 'transcribing',
   extracting: 'extracting',
   extract: 'extracting',
   transcribing: 'transcribing',
@@ -54,7 +52,25 @@ export default function JobDetailPage() {
       if (['completed', 'done'].includes(j.status)) {
         try {
           const f = await api.listFiles(id);
-          setFiles(Array.isArray(f) ? f : f?.files || []);
+          let allFiles = Array.isArray(f) ? f : f?.files || [];
+
+          if (j.video_output_path) {
+            const hasVideo = allFiles.some(
+              file => file.type === 'mp4' || file.category === 'video'
+            );
+            if (!hasVideo) {
+              allFiles.push({
+                id: `${id}-burned-video`,
+                filename: 'video_subtitled.mp4',
+                type: 'mp4',
+                category: 'video',
+                path: j.video_output_path,
+                synthetic: true,
+              });
+            }
+          }
+
+          setFiles(allFiles);
         } catch {}
         if (intervalRef.current) clearInterval(intervalRef.current);
       }
@@ -71,9 +87,15 @@ export default function JobDetailPage() {
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [fetchJob]);
 
-  const handleDownload = async (fileId) => {
+  const handleDownload = async (file) => {
     try {
-      const res = await api.downloadFile(fileId);
+      if (file.synthetic && file.path) {
+        const res = await api.downloadFileByPath(file.path);
+        const url = res.url || res.download_url;
+        if (url) window.open(url, '_blank');
+        return;
+      }
+      const res = await api.downloadFile(file.id || file.file_id);
       const url = res.url || res.download_url;
       if (url) window.open(url, '_blank');
     } catch (e) { setError(e.message); }
@@ -100,7 +122,6 @@ export default function JobDetailPage() {
 
   const st = job ? (statusMap[job.status] || statusMap.queued) : statusMap.queued;
 
-  // Figure out where we are in the pipeline
   const currentStageKey = job
     ? (STATUS_TO_STAGE[job.status] ?? STATUS_TO_STAGE[progress?.stage] ?? null)
     : null;
@@ -108,7 +129,6 @@ export default function JobDetailPage() {
   const isDone = currentStageKey === 'completed';
   const isFailed = currentStageKey === 'failed';
 
-  // Percentage for the currently active stage only
   const activePct = (() => {
     const p = progress?.percentage ?? progress?.progress ?? progress?.pct;
     if (typeof p === 'number') return Math.max(0, Math.min(100, Math.round(p)));
@@ -118,11 +138,10 @@ export default function JobDetailPage() {
     return 0;
   })();
 
-  // Decide per-stage percentage: earlier stages = 100, current = activePct, future = 0
   const stagePct = (idx) => {
     if (isDone) return 100;
     if (isFailed && idx > currentStageIdx) return 0;
-    if (currentStageIdx < 0) return 0; // queued, nothing active yet
+    if (currentStageIdx < 0) return 0;
     if (idx < currentStageIdx) return 100;
     if (idx === currentStageIdx) return activePct;
     return 0;
@@ -149,7 +168,6 @@ export default function JobDetailPage() {
         <div className="text-center py-10 text-muted animate-pulse">Loading job...</div>
       ) : (
         <>
-          {/* Header */}
           <div className="flex items-center justify-between mb-7">
             <div>
               <h2 className="text-xl font-bold mb-1">Job {id.slice(0, 8)}...</h2>
@@ -171,7 +189,6 @@ export default function JobDetailPage() {
             )}
           </div>
 
-          {/* Per-stage progress bars */}
           {(isProcessing || isDone || isFailed) && (
             <div className="bg-surface-card border border-line rounded-xl p-6 mb-5">
               <div className="flex flex-col gap-5">
@@ -195,7 +212,6 @@ export default function JobDetailPage() {
                     <div key={stage.key}>
                       <div className="flex justify-between items-center mb-2">
                         <div className="flex items-center gap-2">
-                          {/* Status icon */}
                           {state === 'done' && (
                             <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24" className="text-emerald-500">
                               <path d="M20 6L9 17l-5-5" />
@@ -225,7 +241,6 @@ export default function JobDetailPage() {
                           style={{ width: `${pct}%` }} />
                       </div>
 
-                      {/* Show chunk count only under the currently active transcribing stage */}
                       {state === 'active' && stage.key === 'transcribing'
                         && progress?.chunks_done !== undefined && (
                         <div className="text-xs text-muted mt-2">
@@ -239,7 +254,6 @@ export default function JobDetailPage() {
             </div>
           )}
 
-          {/* Output Files */}
           {files.length > 0 && (
             <div className="bg-surface-card border border-line rounded-xl p-6">
               <h3 className="text-[15px] font-semibold mb-4">Output Files</h3>
@@ -256,7 +270,7 @@ export default function JobDetailPage() {
                         <div className="text-[11px] text-muted">{f.type || f.mime_type || ''}</div>
                       </div>
                     </div>
-                    <button onClick={() => handleDownload(f.id || f.file_id)}
+                    <button onClick={() => handleDownload(f)}
                       className="flex items-center gap-1.5 px-3.5 py-1.5 bg-brand-500/10 border border-brand-500/20 rounded-md text-brand-400 text-xs hover:bg-brand-500/20 transition-colors">
                       <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                         <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
@@ -269,7 +283,6 @@ export default function JobDetailPage() {
             </div>
           )}
 
-          {/* Error state */}
           {isFailed && (
             <div className="mt-4 px-4 py-3.5 bg-red-500/[0.08] border border-red-500/20 rounded-xl text-red-400 text-[13px]">
               {job.error || 'Job failed — check service logs for details'}

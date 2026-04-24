@@ -32,24 +32,19 @@ class ApiClient {
     const headers = {};
     if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
     if (!isFile && body) headers['Content-Type'] = 'application/json';
-
     const config = { method, headers };
     if (body) config.body = isFile ? body : JSON.stringify(body);
-
     const res = await fetch(`${API_BASE}${path}`, config);
-
     if (res.status === 401) {
       const refreshed = await this.tryRefresh();
       if (refreshed) return this.request(method, path, body, isFile);
       this.clearTokens();
       throw new Error('SESSION_EXPIRED');
     }
-
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Request failed' }));
       throw new Error(err.detail || 'Request failed');
     }
-
     return res.json();
   }
 
@@ -76,17 +71,14 @@ class ApiClient {
     this.saveTokens(data.access_token, data.refresh_token);
     return data;
   }
-
   async register(email, password, username) {
     return this.request('POST', '/auth/register', { email, password, username });
   }
-
   me() { return this.request('GET', '/auth/me'); }
   quota() { return this.request('GET', '/auth/quota'); }
 
   // Upload
   presign() { return this.request('POST', '/upload/presign'); }
-
   async uploadFile(file) {
     const formData = new FormData();
     formData.append('file', file);
@@ -101,8 +93,9 @@ class ApiClient {
   cancelJob(id) { return this.request('POST', `/jobs/${id}/cancel`); }
 
   // Files
-  listFiles(jobId) { return this.request('GET', `/files/${jobId}`); }
-  downloadFile(fileId) { return this.request('GET', `/files/download/${fileId}`); }
+  listFiles(jobId) { return this.request('GET', `/files?job_id=${jobId}`); }
+  downloadFile(fileId) { return this.request('GET', `/files/${fileId}/download`); }
+  downloadFileByPath(path) { return this.request('GET', `/files/download-by-path?path=${encodeURIComponent(path)}`); }
 }
 
 const api = new ApiClient();
