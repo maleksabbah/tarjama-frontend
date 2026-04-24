@@ -49,33 +49,36 @@ export default function JobDetailPage() {
         try { setProgress(await api.getProgress(id)); } catch {}
       }
 
-      if (['completed', 'done'].includes(j.status)) {
-        try {
-          const f = await api.listFiles(id);
-          let allFiles = Array.isArray(f) ? f : f?.files || [];
+      // Always fetch files — backend may have partial outputs
+      // (SRT is ready before burn finishes)
+      try {
+        const f = await api.listFiles(id);
+        let allFiles = Array.isArray(f) ? f : f?.files || [];
 
-          if (j.video_output_path) {
-            const hasVideo = allFiles.some(
-              file => file.type === 'mp4' || file.category === 'video'
-            );
-            if (!hasVideo) {
-              allFiles.push({
-                id: `${id}-burned-video`,
-                filename: 'video_subtitled.mp4',
-                type: 'mp4',
-                category: 'video',
-                path: j.video_output_path,
-                synthetic: true,
-              });
-            }
+        if (j.video_output_path) {
+          const hasVideo = allFiles.some(
+            file => file.type === 'mp4' || file.category === 'video'
+          );
+          if (!hasVideo) {
+            allFiles.push({
+              id: `${id}-burned-video`,
+              filename: 'video_subtitled.mp4',
+              type: 'mp4',
+              category: 'video',
+              path: j.video_output_path,
+              synthetic: true,
+            });
           }
+        }
 
-          setFiles(allFiles);
-        } catch {}
-        if (intervalRef.current) clearInterval(intervalRef.current);
+        setFiles(allFiles);
+      } catch {}
+
+      // Stop polling only when job is in a terminal state
+      if (['completed', 'done', 'failed', 'cancelled'].includes(j.status)
+          && intervalRef.current) {
+        clearInterval(intervalRef.current);
       }
-
-      if (j.status === 'failed' && intervalRef.current) clearInterval(intervalRef.current);
     } catch (e) {
       setError(e.message);
     }
