@@ -49,8 +49,8 @@ export default function JobDetailPage() {
         try { setProgress(await api.getProgress(id)); } catch {}
       }
 
-      // Always fetch files — backend may have partial outputs
-      // (SRT is ready before burn finishes)
+      // Always fetch files — backend may have partial outputs ready
+      // (SRT/transcript available before burn finishes)
       try {
         const f = await api.listFiles(id);
         let allFiles = Array.isArray(f) ? f : f?.files || [];
@@ -74,7 +74,6 @@ export default function JobDetailPage() {
         setFiles(allFiles);
       } catch {}
 
-      // Stop polling only when job is in a terminal state
       if (['completed', 'done', 'failed', 'cancelled'].includes(j.status)
           && intervalRef.current) {
         clearInterval(intervalRef.current);
