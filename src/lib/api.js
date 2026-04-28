@@ -77,12 +77,32 @@ class ApiClient {
   me() { return this.request('GET', '/auth/me'); }
   quota() { return this.request('GET', '/auth/quota'); }
 
-  // Upload
-  presign() { return this.request('POST', '/upload/presign'); }
-  async uploadFile(file) {
-    const formData = new FormData();
-    formData.append('file', file);
-    return this.request('POST', '/upload', formData, true);
+  // Upload — presigned URL flow
+  async uploadFile(file, onProgress = null) {
+    // 1. Get presigned PUT URL from gateway
+    const presign = await this.request('POST', '/upload/presign');
+    const { upload_url, s3_key, upload_id } = presign;
+
+    // 2. PUT the file directly to MinIO
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', upload_url);
+      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+      xhr.upload.onprogress = (e) => {
+        if (onProgress && e.lengthComputable) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error(`Upload failed: ${xhr.status}`));
+      };
+      xhr.onerror = () => reject(new Error('Upload network error'));
+      xhr.send(file);
+    });
+
+    // 3. Return S3 key for createJob to use as file_path
+    return { s3_key, upload_id };
   }
 
   // Jobs
@@ -93,8 +113,8 @@ class ApiClient {
   cancelJob(id) { return this.request('POST', `/jobs/${id}/cancel`); }
 
   // Files
-  listFiles(jobId) { return this.request('GET', `/files?job_id=${jobId}`); }
-  downloadFile(fileId) { return this.request('GET', `/files/${fileId}/download`); }
+  listFiles(jobId) { return this.request('GET', `/files/${jobId}`); }
+  downloadFile(fileId) { return this.request('GET', `/files/download/${fileId}`); }
   downloadFileByPath(path) { return this.request('GET', `/files/download-by-path?path=${encodeURIComponent(path)}`); }
 }
 
