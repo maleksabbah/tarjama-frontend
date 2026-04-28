@@ -49,28 +49,11 @@ export default function JobDetailPage() {
         try { setProgress(await api.getProgress(id)); } catch {}
       }
 
-      // Always fetch files — backend may have partial outputs ready
-      // (SRT/transcript available before burn finishes)
+      // Always fetch files — backend registers each artifact as its stage finishes.
+      // SRT + JSON appear after subtitling stage; burned video appears after burning.
       try {
         const f = await api.listFiles(id);
-        let allFiles = Array.isArray(f) ? f : f?.files || [];
-
-        if (j.video_output_path) {
-          const hasVideo = allFiles.some(
-            file => file.type === 'mp4' || file.category === 'video'
-          );
-          if (!hasVideo) {
-            allFiles.push({
-              id: `${id}-burned-video`,
-              filename: 'video_subtitled.mp4',
-              type: 'mp4',
-              category: 'video',
-              path: j.video_output_path,
-              synthetic: true,
-            });
-          }
-        }
-
+        const allFiles = Array.isArray(f) ? f : f?.files || [];
         setFiles(allFiles);
       } catch {}
 
@@ -91,12 +74,6 @@ export default function JobDetailPage() {
 
   const handleDownload = async (file) => {
     try {
-      if (file.synthetic && file.path) {
-        const res = await api.downloadFileByPath(file.path);
-        const url = res.url || res.download_url;
-        if (url) window.open(url, '_blank');
-        return;
-      }
       const res = await api.downloadFile(file.id || file.file_id);
       const url = res.url || res.download_url;
       if (url) window.open(url, '_blank');
