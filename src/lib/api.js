@@ -108,14 +108,18 @@ class ApiClient {
   // Jobs
   createJob(data) { return this.request('POST', '/jobs', data); }
   listJobs() { return this.request('GET', '/jobs'); }
-  getJob(id) { return this.request('GET', `/jobs/${id}`); }
+  async getJob(id) {
+    // backend has no GET /jobs/{id}; find it in the list
+    const jobs = await this.request('GET', '/jobs');
+    const arr = Array.isArray(jobs) ? jobs : (jobs.jobs || jobs.items || []);
+    return arr.find(j => (j.id || j.job_id) === id) || null;
+  }
   getProgress(id) { return this.request('GET', `/jobs/${id}/progress`); }
-  cancelJob(id) { return this.request('POST', `/jobs/${id}/cancel`); }
+  cancelJob(id) { return this.request('GET', `/jobs/${id}/cancel`); }
 
   // Files
   listFiles(jobId) { return this.request('GET', `/files/${jobId}`); }
   downloadFile(fileId) { return this.request('GET', `/files/download/${fileId}`); }
-  downloadFileByPath(path) { return this.request('GET', `/files/download-by-path?path=${encodeURIComponent(path)}`); }
 }
 
 const api = new ApiClient();
