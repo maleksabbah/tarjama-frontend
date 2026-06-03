@@ -1,5 +1,6 @@
 import './globals.css';
 import { AuthProvider } from '@/lib/auth';
+import WakeGate from '@/components/WakeGate';
 
 export const metadata = {
   title: 'Tarjama — Arabic ASR Platform',
@@ -10,9 +11,11 @@ export default function RootLayout({ children }) {
   return (
     <html lang="en">
       <body>
-        <AuthProvider>
-          {children}
-        </AuthProvider>
+        <WakeGate>
+          <AuthProvider>
+            {children}
+          </AuthProvider>
+        </WakeGate>
       </body>
     </html>
   );
