@@ -26,7 +26,6 @@ export default function LivePage() {
     return `${protocol}://${base}/api/ws/live?token=${encodeURIComponent(token || "")}`;
   }
 
-  // Float32 [-1, 1] -> Int16 PCM, with proper clamping
   function downsampleAndQuantize(float32, sourceRate) {
     let samples;
     if (sourceRate === TARGET_SAMPLE_RATE) {
@@ -43,7 +42,6 @@ export default function LivePage() {
         samples[i] = sum / Math.max(1, endIdx - startIdx);
       }
     }
-
     const out = new Int16Array(samples.length);
     for (let i = 0; i < samples.length; i++) {
       const s = Math.max(-1, Math.min(1, samples[i]));
@@ -55,9 +53,6 @@ export default function LivePage() {
   const startRecording = async () => {
     setError("");
     try {
-      // IMPORTANT: disable AGC/noise suppression/echo cancellation.
-      // Chrome's default mic pipeline clips speech into saturation before
-      // it reaches our Float32 samples, which breaks Whisper transcription.
       const s = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: TARGET_SAMPLE_RATE,
@@ -75,28 +70,24 @@ export default function LivePage() {
 
       socket.onopen = async () => {
         setConnected(true);
-
         const ctx = new (window.AudioContext || window.webkitAudioContext)({
           sampleRate: TARGET_SAMPLE_RATE,
         });
         audioCtx.current = ctx;
-
         const source = ctx.createMediaStreamSource(s);
-
         const bufferSize = 4096;
         const processor = ctx.createScriptProcessor(bufferSize, 1, 1);
         worklet.current = processor;
 
         let batchBuffer = [];
         let batchSamples = 0;
-        const samplesPerBatch = TARGET_SAMPLE_RATE / 2; // 500ms
+        const samplesPerBatch = TARGET_SAMPLE_RATE / 2;
 
         processor.onaudioprocess = (e) => {
           if (socket.readyState !== WebSocket.OPEN) return;
           const input = e.inputBuffer.getChannelData(0);
           batchBuffer.push(new Float32Array(input));
           batchSamples += input.length;
-
           if (batchSamples >= samplesPerBatch) {
             const combined = new Float32Array(batchSamples);
             let offset = 0;
@@ -106,7 +97,6 @@ export default function LivePage() {
             }
             batchBuffer = [];
             batchSamples = 0;
-
             const pcm = downsampleAndQuantize(combined, ctx.sampleRate);
             socket.send(pcm.buffer);
           }
@@ -114,7 +104,6 @@ export default function LivePage() {
 
         source.connect(processor);
         processor.connect(ctx.destination);
-
         setRecording(true);
         setDuration(0);
         timer.current = setInterval(() => setDuration((d) => d + 1), 1000);
@@ -151,28 +140,12 @@ export default function LivePage() {
   };
 
   const stopRecording = () => {
-    if (timer.current) {
-      clearInterval(timer.current);
-      timer.current = null;
-    }
-    if (worklet.current) {
-      try {
-        worklet.current.disconnect();
-      } catch {}
-      worklet.current = null;
-    }
-    if (audioCtx.current) {
-      audioCtx.current.close().catch(() => {});
-      audioCtx.current = null;
-    }
-    if (stream.current) {
-      stream.current.getTracks().forEach((t) => t.stop());
-      stream.current = null;
-    }
+    if (timer.current) { clearInterval(timer.current); timer.current = null; }
+    if (worklet.current) { try { worklet.current.disconnect(); } catch {} worklet.current = null; }
+    if (audioCtx.current) { audioCtx.current.close().catch(() => {}); audioCtx.current = null; }
+    if (stream.current) { stream.current.getTracks().forEach((t) => t.stop()); stream.current = null; }
     if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-      try {
-        ws.current.send(JSON.stringify({ type: "end" }));
-      } catch {}
+      try { ws.current.send(JSON.stringify({ type: "end" })); } catch {}
       ws.current.close();
     }
     setRecording(false);
@@ -186,92 +159,66 @@ export default function LivePage() {
   };
 
   return (
-    <div style={{ padding: 32, maxWidth: 800, margin: "0 auto" }}>
-      <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 8 }}>Live Transcription</h1>
-      <p style={{ color: "#888", marginBottom: 24 }}>
+    <div className="animate-fade-in">
+      <h1 className="text-[22px] font-bold mb-1.5">Live Transcription</h1>
+      <p className="text-muted text-sm mb-7">
         Speak into your microphone for real-time Arabic transcription.
       </p>
 
       {error && (
-        <div
-          style={{
-            background: "#fee",
-            border: "1px solid #fcc",
-            borderRadius: 8,
-            padding: "12px 16px",
-            marginBottom: 16,
-            color: "#c00",
-          }}
-        >
+        <div className="bg-red-500/10 border border-red-500/30 text-red-400 text-sm rounded-lg px-4 py-3 mb-5">
           {error}
         </div>
       )}
 
-      <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 24 }}>
-        {!recording ? (
-          <button
-            onClick={startRecording}
-            style={{
-              padding: "10px 20px",
-              background: "#0070f3",
-              color: "white",
-              border: "none",
-              borderRadius: 8,
-              cursor: "pointer",
-              fontSize: 16,
-            }}
-          >
-            Start Recording
-          </button>
-        ) : (
-          <button
-            onClick={stopRecording}
-            style={{
-              padding: "10px 20px",
-              background: "#dc3545",
-              color: "white",
-              border: "none",
-              borderRadius: 8,
-              cursor: "pointer",
-              fontSize: 16,
-            }}
-          >
-            Stop Recording
-          </button>
-        )}
-        {recording && <span style={{ color: "#888" }}>🔴 {formatDuration(duration)}</span>}
-        {connected && !recording && <span style={{ color: "#0a0" }}>Connected</span>}
+      <div className="bg-surface-card border border-line rounded-xl p-5 mb-7">
+        <div className="flex items-center gap-4">
+          {!recording ? (
+            <button
+              onClick={startRecording}
+              className="px-5 py-2.5 rounded-lg gradient-bg text-white text-sm font-medium flex items-center gap-2 transition-all hover:opacity-90"
+            >
+              <span className="w-2 h-2 rounded-full bg-white" />
+              Start Recording
+            </button>
+          ) : (
+            <button
+              onClick={stopRecording}
+              className="px-5 py-2.5 rounded-lg bg-red-500 text-white text-sm font-medium flex items-center gap-2 transition-all hover:bg-red-600"
+            >
+              <span className="w-2 h-2 rounded-sm bg-white" />
+              Stop Recording
+            </button>
+          )}
+
+          {recording && (
+            <span className="flex items-center gap-2 text-sm text-muted">
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              {formatDuration(duration)}
+            </span>
+          )}
+          {connected && !recording && (
+            <span className="text-sm text-green-400">Connected</span>
+          )}
+        </div>
       </div>
 
       {current && (
-        <div
-          style={{
-            background: "#f5f5f5",
-            padding: 16,
-            borderRadius: 8,
-            marginBottom: 16,
-            fontStyle: "italic",
-            color: "#666",
-          }}
-        >
+        <div className="bg-surface-card border border-line rounded-lg px-4 py-3 mb-4 text-muted italic text-sm" dir="rtl">
           {current}
         </div>
       )}
 
-      <div>
+      <div className="flex flex-col gap-2">
+        {transcript.length === 0 && !current && (
+          <div className="w-full py-10 border border-dashed border-line rounded-xl text-muted text-sm flex items-center justify-center">
+            Your transcription will appear here.
+          </div>
+        )}
         {transcript.map((t, i) => (
-          <div
-            key={i}
-            style={{
-              padding: 12,
-              background: "#fafafa",
-              border: "1px solid #eee",
-              borderRadius: 8,
-              marginBottom: 8,
-            }}
-          >
-            <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>{t.time}</div>
-            <div>{t.text}</div>
+          <div key={i} className="bg-surface-card border border-line rounded-lg px-4 py-3">
+            <div className="text-[11px] text-muted font-mono mb-1">{t.time}</div>
+            <div className="text-[15px]" dir="rtl">{t.text}</div>
           </div>
         ))}
       </div>
