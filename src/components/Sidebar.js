@@ -5,6 +5,7 @@ import { useAuth } from '@/lib/auth';
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: 'M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z' },
   { href: '/upload', label: 'Upload', icon: 'M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12' },
+  { href: '/live', label: 'Live', icon: 'M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3zM19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8' },
   { href: '/jobs', label: 'Jobs', icon: 'M12 2a10 10 0 100 20 10 10 0 000-20zM12 6v6l4 2' },
   { href: '/settings', label: 'Settings', icon: 'M12 15a3 3 0 100-6 3 3 0 000 6z' },
 ];
