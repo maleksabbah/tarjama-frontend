@@ -20,10 +20,8 @@ export default function LivePage() {
 
   function getWsUrl() {
     const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
-    const base = apiUrl.replace('/api', '').replace('https://', '').replace('http://', '');
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    return `${protocol}://${base}/api/ws/live?token=${encodeURIComponent(token || "")}`;
+    const base = process.env.NEXT_PUBLIC_WS_URL || 'wss://api.tarjma.app';
+    return `${base}/api/ws/live?token=${encodeURIComponent(token || "")}`;
   }
 
   function downsampleAndQuantize(float32, sourceRate) {
