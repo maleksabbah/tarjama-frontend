@@ -20,9 +20,9 @@ export default function LivePage() {
 
   function getWsUrl() {
     const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+    const base = apiUrl.replace('/api', '').replace('https://', '').replace('http://', '');
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const host = window.location.host;
-    const base = host.startsWith("app.") ? host.replace("app.", "api.") : host;
     return `${protocol}://${base}/api/ws/live?token=${encodeURIComponent(token || "")}`;
   }
 
