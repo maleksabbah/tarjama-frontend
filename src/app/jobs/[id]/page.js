@@ -1,280 +1,221 @@
 'use client';
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useState, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import api from '@/lib/api';
 
-const STAGES = [
-  { key: 'extracting', label: 'Extracting audio' },
-  { key: 'transcribing', label: 'Transcribing' },
-  { key: 'subtitling', label: 'Generating subtitles' },
-  { key: 'burning', label: 'Burning subtitles' },
+var dialects = [
+  { value: 'lebanese', label: 'Lebanese' },
+  { value: 'syrian', label: 'Syrian' },
+  { value: 'egyptian', label: 'Egyptian' },
+  { value: 'jordanian', label: 'Jordanian' },
+  { value: 'gulf', label: 'Gulf' },
+  { value: 'msa', label: 'MSA' },
+  { value: 'auto', label: 'Auto-detect' },
 ];
 
-const STATUS_TO_STAGE = {
-  queued: null,
-  pending: null,
-  processing: 'transcribing',
-  extracting: 'extracting',
-  extract: 'extracting',
-  transcribing: 'transcribing',
-  transcribe: 'transcribing',
-  subtitling: 'subtitling',
-  subtitle: 'subtitling',
-  generating_subtitles: 'subtitling',
-  burning: 'burning',
-  burn: 'burning',
-  burning_subtitles: 'burning',
-  completed: 'completed',
-  done: 'completed',
-  failed: 'failed',
-  cancelled: 'cancelled',
-};
+export default function UploadPage() {
+  var router = useRouter();
+  var fileRef = useRef(null);
+  var [file, setFile] = useState(null);
+  var [dialect, setDialect] = useState('lebanese');
+  var [outputType, setOutputType] = useState('all');
+  var [subtitleFormat, setSubtitleFormat] = useState('srt');
+  var [burnSubs, setBurnSubs] = useState(false);
+  var [uploading, setUploading] = useState(false);
+  var [progress, setProgress] = useState(0);
+  var [statusMsg, setStatusMsg] = useState('');
+  var [error, setError] = useState('');
+  var [dragOver, setDragOver] = useState(false);
 
-export default function JobDetailPage() {
-  const { id } = useParams();
-  const router = useRouter();
-  const [job, setJob] = useState(null);
-  const [progress, setProgress] = useState(null);
-  const [files, setFiles] = useState([]);
-  const [error, setError] = useState('');
-  const intervalRef = useRef(null);
+  var handleDrop = function(e) {
+    e.preventDefault();
+    setDragOver(false);
+    var f = e.dataTransfer.files[0];
+    if (f && (f.type.startsWith('video/') || f.name.match(/\.(mp4|mkv|avi|mov|webm)$/i))) {
+      setFile(f);
+      setError('');
+    } else {
+      setError('Please drop a video file');
+    }
+  };
 
-  const fetchJob = useCallback(async () => {
+  var sleep = function(ms) {
+    return new Promise(function(resolve) { setTimeout(resolve, ms); });
+  };
+
+  var handleUpload = async function() {
+    if (!file) return;
+    setUploading(true);
+    setError('');
+    setStatusMsg('Uploading...');
+    setProgress(10);
     try {
-      const j = await api.getJob(id);
-      setJob(j);
+      setProgress(30);
+      var uploadRes = await api.uploadFile(file, function(p) {
+        setProgress(Math.min(60, 10 + Math.round(p * 0.5)));
+      });
+      setProgress(65);
+      setStatusMsg('Creating job...');
 
-      const active = !['completed', 'done', 'failed', 'cancelled'].includes(j.status);
-      if (active) {
-        try { setProgress(await api.getProgress(id)); } catch {}
+      var jobRes = null;
+      var maxRetries = 5;
+      var attempt = 0;
+
+      while (attempt < maxRetries) {
+        try {
+          jobRes = await api.createJob({
+            file_path: uploadRes.s3_key,
+            dialect: dialect,
+            output_type: outputType,
+            subtitle_format: subtitleFormat,
+            burn_subtitles: burnSubs,
+          });
+          break;
+        } catch (err) {
+          attempt++;
+          if (attempt >= maxRetries) {
+            throw err;
+          }
+          setStatusMsg('GPU is warming up, retrying... (' + attempt + '/' + maxRetries + ')');
+          setProgress(65 + attempt * 5);
+          await sleep(5000);
+        }
       }
 
-      // Always fetch files — backend registers each artifact as its stage finishes.
-      // SRT + JSON appear after subtitling stage; burned video appears after burning.
-      try {
-        const f = await api.listFiles(id);
-        const allFiles = Array.isArray(f) ? f : f?.files || [];
-        setFiles(allFiles);
-      } catch {}
-
-      if (['completed', 'done', 'failed', 'cancelled'].includes(j.status)
-          && intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
+      setProgress(100);
+      setStatusMsg('Done!');
+      setTimeout(function() {
+        router.push('/jobs/' + (jobRes.id || jobRes.job_id));
+      }, 400);
     } catch (e) {
-      setError(e.message);
+      setError(e.message || 'Something went wrong. The GPU may still be warming up. Please try again in a minute.');
+      setStatusMsg('');
+      setUploading(false);
+      setProgress(0);
     }
-  }, [id]);
-
-  useEffect(() => {
-    fetchJob();
-    intervalRef.current = setInterval(fetchJob, 2000);
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [fetchJob]);
-
-  const handleDownload = async (file) => {
-    try {
-      const res = await api.downloadFile(file.id || file.file_id);
-      const url = res.url || res.download_url;
-      if (url) window.open(url, '_blank');
-    } catch (e) { setError(e.message); }
   };
 
-  const handleCancel = async () => {
-    try { await api.cancelJob(id); fetchJob(); }
-    catch (e) { setError(e.message); }
+  var formatSize = function(b) {
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+    if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
+    return (b / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
   };
 
-  const statusMap = {
-    queued: { color: 'text-amber-500', label: 'Queued' },
-    pending: { color: 'text-amber-500', label: 'Pending' },
-    processing: { color: 'text-brand-400', label: 'Processing' },
-    extracting: { color: 'text-brand-400', label: 'Extracting' },
-    transcribing: { color: 'text-brand-400', label: 'Transcribing' },
-    subtitling: { color: 'text-brand-400', label: 'Generating subtitles' },
-    burning: { color: 'text-brand-400', label: 'Burning subtitles' },
-    completed: { color: 'text-emerald-500', label: 'Completed' },
-    done: { color: 'text-emerald-500', label: 'Completed' },
-    failed: { color: 'text-red-400', label: 'Failed' },
-    cancelled: { color: 'text-muted', label: 'Cancelled' },
-  };
-
-  const st = job ? (statusMap[job.status] || statusMap.queued) : statusMap.queued;
-
-  const currentStageKey = job
-    ? (STATUS_TO_STAGE[job.status] ?? STATUS_TO_STAGE[progress?.stage] ?? null)
-    : null;
-  const currentStageIdx = STAGES.findIndex(s => s.key === currentStageKey);
-  const isDone = currentStageKey === 'completed';
-  const isFailed = currentStageKey === 'failed';
-
-  const activePct = (() => {
-    const p = progress?.percentage ?? progress?.progress ?? progress?.pct;
-    if (typeof p === 'number') return Math.max(0, Math.min(100, Math.round(p)));
-    if (progress?.chunks_total > 0) {
-      return Math.round((progress.chunks_done / progress.chunks_total) * 100);
-    }
-    return 0;
-  })();
-
-  const stagePct = (idx) => {
-    if (isDone) return 100;
-    if (isFailed && idx > currentStageIdx) return 0;
-    if (currentStageIdx < 0) return 0;
-    if (idx < currentStageIdx) return 100;
-    if (idx === currentStageIdx) return activePct;
-    return 0;
-  };
-
-  const stageState = (idx) => {
-    if (isDone) return 'done';
-    if (isFailed && idx === currentStageIdx) return 'failed';
-    if (idx < currentStageIdx) return 'done';
-    if (idx === currentStageIdx) return 'active';
-    return 'pending';
-  };
-
-  const isProcessing = job && !['completed', 'done', 'failed', 'cancelled'].includes(job.status);
+  var selectCls = "w-full px-3.5 py-2.5 bg-surface-input border border-line rounded-lg text-[13px] outline-none focus:border-brand-500 transition-colors appearance-none cursor-pointer bg-[length:12px] bg-[right_12px_center] bg-no-repeat";
+  var selectBg = { backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'12\' height=\'12\' viewBox=\'0 0 24 24\' fill=\'none\' stroke=\'%236b6b80\' stroke-width=\'2\'%3E%3Cpath d=\'M6 9l6 6 6-6\'/%3E%3C/svg%3E")' };
 
   return (
     <div className="animate-fade-in">
-      <button onClick={() => router.push('/jobs')}
-        className="text-muted text-[13px] mb-5 hover:text-brand-400 transition-colors">
-        ← Back to jobs
-      </button>
+      <h2 className="text-[22px] font-bold mb-1.5">Upload Video</h2>
+      <p className="text-muted text-sm mb-7">Upload an Arabic video to generate subtitles</p>
 
-      {!job ? (
-        <div className="text-center py-10 text-muted animate-pulse">Loading job...</div>
-      ) : (
-        <>
-          <div className="flex items-center justify-between mb-7">
-            <div>
-              <h2 className="text-xl font-bold mb-1">Job {id.slice(0, 8)}...</h2>
-              <div className="flex items-center gap-2">
-                <span className={`text-[13px] font-semibold ${st.color}`}>{st.label}</span>
-                {job.dialect && (
-                  <span className="text-xs text-muted bg-surface px-2 py-0.5 rounded">{job.dialect}</span>
-                )}
-              </div>
+      <div
+        onDragOver={function(e) { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={function() { setDragOver(false); }}
+        onDrop={handleDrop}
+        onClick={function() { if (fileRef.current) fileRef.current.click(); }}
+        className={'border-2 border-dashed rounded-2xl cursor-pointer transition-all '
+          + (file ? 'p-6 ' : 'py-12 px-6 ')
+          + (dragOver ? 'border-brand-500 bg-brand-500/5 animate-drop-pulse' : 'border-line hover:border-muted')}
+      >
+        <input ref={fileRef} type="file" accept="video/*" className="hidden"
+          onChange={function(e) { if (e.target.files[0]) setFile(e.target.files[0]); }} />
+
+        {file ? (
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl bg-brand-500/10 flex items-center justify-center text-brand-400 shrink-0">
+              <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><path d="M14 2v6h6" />
+              </svg>
             </div>
-            {isProcessing && (
-              <button onClick={handleCancel}
-                className="flex items-center gap-1.5 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-[13px] hover:bg-red-500/20 transition-colors">
-                <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <circle cx="12" cy="12" r="10" /><path d="M15 9l-6 6M9 9l6 6" />
-                </svg>
-                Cancel
-              </button>
-            )}
+            <div className="flex-1">
+              <div className="text-sm font-semibold mb-1">{file.name}</div>
+              <div className="text-xs text-muted">{formatSize(file.size)}</div>
+            </div>
+            <button onClick={function(e) { e.stopPropagation(); setFile(null); }}
+              className="px-3 py-1.5 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-xs cursor-pointer hover:bg-red-500/20 transition-colors">
+              Remove
+            </button>
           </div>
-
-          {(isProcessing || isDone || isFailed) && (
-            <div className="bg-surface-card border border-line rounded-xl p-6 mb-5">
-              <div className="flex flex-col gap-5">
-                {STAGES.map((stage, idx) => {
-                  const state = stageState(idx);
-                  const pct = stagePct(idx);
-                  const labelColor = {
-                    done: 'text-emerald-500',
-                    active: 'text-brand-400',
-                    failed: 'text-red-400',
-                    pending: 'text-muted',
-                  }[state];
-                  const barColor = {
-                    done: 'bg-emerald-500',
-                    active: 'bg-gradient-to-r from-brand-500 to-brand-400',
-                    failed: 'bg-red-500',
-                    pending: 'bg-line',
-                  }[state];
-
-                  return (
-                    <div key={stage.key}>
-                      <div className="flex justify-between items-center mb-2">
-                        <div className="flex items-center gap-2">
-                          {state === 'done' && (
-                            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24" className="text-emerald-500">
-                              <path d="M20 6L9 17l-5-5" />
-                            </svg>
-                          )}
-                          {state === 'active' && (
-                            <div className="w-3 h-3 rounded-full bg-brand-400 animate-pulse" />
-                          )}
-                          {state === 'failed' && (
-                            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24" className="text-red-400">
-                              <path d="M18 6L6 18M6 6l12 12" />
-                            </svg>
-                          )}
-                          {state === 'pending' && (
-                            <div className="w-3 h-3 rounded-full border-2 border-line" />
-                          )}
-                          <span className={`text-[13px] font-semibold ${labelColor}`}>
-                            {stage.label}
-                          </span>
-                        </div>
-                        <span className={`text-[13px] font-mono ${labelColor}`}>
-                          {state === 'pending' ? '—' : `${pct}%`}
-                        </span>
-                      </div>
-                      <div className="h-1.5 bg-surface rounded-full overflow-hidden">
-                        <div className={`h-full rounded-full transition-all duration-700 ${barColor}`}
-                          style={{ width: `${pct}%` }} />
-                      </div>
-
-                      {state === 'active' && stage.key === 'transcribing'
-                        && progress?.chunks_done !== undefined && (
-                        <div className="text-xs text-muted mt-2">
-                          {progress.chunks_done} / {progress.chunks_total || '?'} chunks processed
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+        ) : (
+          <div className="text-center">
+            <div className="text-dim mb-4">
+              <svg width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" className="mx-auto">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" />
+              </svg>
             </div>
-          )}
+            <div className="text-[15px] font-semibold mb-1.5">Drop your video here</div>
+            <div className="text-[13px] text-muted">or click to browse — MP4, MKV, AVI, MOV</div>
+          </div>
+        )}
+      </div>
 
-          {files.length > 0 && (
-            <div className="bg-surface-card border border-line rounded-xl p-6">
-              <h3 className="text-[15px] font-semibold mb-4">Output Files</h3>
-              <div className="flex flex-col gap-2.5">
-                {files.map((f, i) => (
-                  <div key={f.id || i}
-                    className="flex items-center justify-between px-4 py-3 bg-surface rounded-lg border border-line">
-                    <div className="flex items-center gap-3">
-                      <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" className="text-brand-400">
-                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><path d="M14 2v6h6" />
-                      </svg>
-                      <div>
-                        <div className="text-[13px] font-medium">{f.filename || f.name || `File ${i + 1}`}</div>
-                        <div className="text-[11px] text-muted">{f.type || f.mime_type || ''}</div>
-                      </div>
-                    </div>
-                    <button onClick={() => handleDownload(f)}
-                      className="flex items-center gap-1.5 px-3.5 py-1.5 bg-brand-500/10 border border-brand-500/20 rounded-md text-brand-400 text-xs hover:bg-brand-500/20 transition-colors">
-                      <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
-                      </svg>
-                      Download
-                    </button>
-                  </div>
-                ))}
-              </div>
+      <div className="grid grid-cols-2 gap-4 mt-6">
+        <div>
+          <label className="text-xs text-muted mb-1.5 block font-medium">Dialect</label>
+          <select value={dialect} onChange={function(e) { setDialect(e.target.value); }}
+            className={selectCls} style={selectBg}>
+            {dialects.map(function(d) { return <option key={d.value} value={d.value}>{d.label}</option>; })}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-muted mb-1.5 block font-medium">Output</label>
+          <select value={outputType} onChange={function(e) { setOutputType(e.target.value); }}
+            className={selectCls} style={selectBg}>
+            <option value="all">All formats</option>
+            <option value="transcript">Transcript only</option>
+            <option value="subtitles">Subtitles only</option>
+            <option value="video">Subtitled video</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-muted mb-1.5 block font-medium">Subtitle Format</label>
+          <select value={subtitleFormat} onChange={function(e) { setSubtitleFormat(e.target.value); }}
+            className={selectCls} style={selectBg}>
+            <option value="srt">SRT</option>
+            <option value="vtt">VTT</option>
+            <option value="ass">ASS</option>
+          </select>
+        </div>
+        <div className="flex items-end pb-0.5">
+          <label className="flex items-center gap-2.5 cursor-pointer text-[13px]">
+            <div onClick={function() { setBurnSubs(!burnSubs); }}
+              className={'w-[42px] h-6 rounded-full p-0.5 transition-colors cursor-pointer '
+                + (burnSubs ? 'bg-brand-500' : 'bg-line')}>
+              <div className={'w-5 h-5 rounded-full bg-white transition-transform '
+                + (burnSubs ? 'translate-x-[18px]' : 'translate-x-0')} />
             </div>
-          )}
+            Burn subtitles onto video
+          </label>
+        </div>
+      </div>
 
-          {isFailed && (
-            <div className="mt-4 px-4 py-3.5 bg-red-500/[0.08] border border-red-500/20 rounded-xl text-red-400 text-[13px]">
-              {job.error || 'Job failed — check service logs for details'}
-            </div>
-          )}
-
-          {error && (
-            <div className="mt-4 px-3.5 py-2.5 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-[13px]">
-              {error}
-            </div>
-          )}
-        </>
+      {uploading && (
+        <div className="mt-6">
+          <div className="flex justify-between mb-2">
+            <span className="text-[13px] text-muted">
+              {statusMsg || 'Processing...'}
+            </span>
+            <span className="text-[13px] text-brand-400 font-mono">{progress}%</span>
+          </div>
+          <div className="h-1 bg-line rounded-full overflow-hidden">
+            <div className="h-full rounded-full progress-bar transition-all duration-500"
+              style={{ width: progress + '%' }} />
+          </div>
+        </div>
       )}
+
+      {error && (
+        <div className="mt-4 px-3.5 py-2.5 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-[13px]">
+          {error}
+        </div>
+      )}
+
+      <button onClick={handleUpload} disabled={!file || uploading}
+        className={'w-full mt-6 py-3.5 rounded-xl text-white text-[15px] font-semibold transition-all '
+          + (!file || uploading ? 'bg-dim opacity-50 cursor-not-allowed' : 'gradient-bg hover:opacity-90 cursor-pointer')}>
+        {uploading ? 'Processing...' : 'Start Transcription'}
+      </button>
     </div>
   );
 }
