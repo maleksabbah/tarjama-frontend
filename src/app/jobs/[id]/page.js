@@ -30,6 +30,35 @@ var STATUS_TO_STAGE = {
   cancelled: 'cancelled',
 };
 
+var WAIT_MESSAGES = [
+  { after: 0, msg: 'Processing your video...' },
+  { after: 30, msg: 'GPU is warming up, this may take a minute...' },
+  { after: 60, msg: 'Still starting up \u2014 the GPU takes a moment on first use...' },
+  { after: 120, msg: 'This is taking longer than usual. Hang tight...' },
+  { after: 180, msg: 'The server is still working on it. You can wait or refresh to check back.' },
+];
+
+function getWaitMessage(seconds) {
+  var msg = WAIT_MESSAGES[0].msg;
+  for (var i = 0; i < WAIT_MESSAGES.length; i++) {
+    if (seconds >= WAIT_MESSAGES[i].after) {
+      msg = WAIT_MESSAGES[i].msg;
+    }
+  }
+  return msg;
+}
+
+function friendlyError(e) {
+  var msg = (e && e.message) ? e.message : '';
+  if (msg.toLowerCase().indexOf('fetch') !== -1 || msg.toLowerCase().indexOf('network') !== -1) {
+    return 'Having trouble reaching the server. The GPU may be warming up \u2014 please wait a moment and try again.';
+  }
+  if (msg.toLowerCase().indexOf('session_expired') !== -1 || msg.toLowerCase().indexOf('401') !== -1) {
+    return 'Your session has expired. Please log in again.';
+  }
+  return msg || 'Something went wrong. Please try again.';
+}
+
 export default function JobDetailPage() {
   var { id } = useParams();
   var router = useRouter();
@@ -38,10 +67,17 @@ export default function JobDetailPage() {
   var [files, setFiles] = useState([]);
   var [error, setError] = useState('');
   var intervalRef = useRef(null);
+  var [waitSeconds, setWaitSeconds] = useState(0);
+  var waitTimerRef = useRef(null);
+  var [stageStartTime, setStageStartTime] = useState(null);
 
   var fetchJob = useCallback(async function() {
     try {
       var j = await api.getJob(id);
+      if (!j) {
+        setError('Job not found');
+        return;
+      }
       setJob(j);
 
       var active = !['completed', 'done', 'failed', 'cancelled'].includes(j.status);
@@ -60,7 +96,7 @@ export default function JobDetailPage() {
         clearInterval(intervalRef.current);
       }
     } catch (e) {
-      setError(e.message);
+      setError(friendlyError(e));
     }
   }, [id]);
 
@@ -70,17 +106,33 @@ export default function JobDetailPage() {
     return function() { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [fetchJob]);
 
+  useEffect(function() {
+    if (job && !['completed', 'done', 'failed', 'cancelled'].includes(job.status)) {
+      if (!stageStartTime) setStageStartTime(Date.now());
+      waitTimerRef.current = setInterval(function() {
+        if (stageStartTime) {
+          setWaitSeconds(Math.floor((Date.now() - stageStartTime) / 1000));
+        }
+      }, 1000);
+    } else {
+      if (waitTimerRef.current) clearInterval(waitTimerRef.current);
+      setWaitSeconds(0);
+      setStageStartTime(null);
+    }
+    return function() { if (waitTimerRef.current) clearInterval(waitTimerRef.current); };
+  }, [job && job.status, stageStartTime]);
+
   var handleDownload = async function(file) {
     try {
       var res = await api.downloadFile(file.id || file.file_id);
       var url = res.url || res.download_url;
       if (url) window.open(url, '_blank');
-    } catch (e) { setError(e.message); }
+    } catch (e) { setError(friendlyError(e)); }
   };
 
   var handleCancel = async function() {
     try { await api.cancelJob(id); fetchJob(); }
-    catch (e) { setError(e.message); }
+    catch (e) { setError(friendlyError(e)); }
   };
 
   var statusMap = {
@@ -138,7 +190,7 @@ export default function JobDetailPage() {
     <div className="animate-fade-in">
       <button onClick={function() { router.push('/jobs'); }}
         className="text-muted text-[13px] mb-5 hover:text-brand-400 transition-colors">
-        ← Back to jobs
+        &#8592; Back to jobs
       </button>
 
       {!job ? (
@@ -165,6 +217,15 @@ export default function JobDetailPage() {
               </button>
             )}
           </div>
+
+          {isProcessing && waitSeconds > 20 && activePct === 0 && (
+            <div className="mb-4 px-4 py-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-500 text-[13px] flex items-center gap-2.5">
+              <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" />
+              </svg>
+              {getWaitMessage(waitSeconds)}
+            </div>
+          )}
 
           {(isProcessing || isDone || isFailed) && (
             <div className="bg-surface-card border border-line rounded-xl p-6 mb-5">
@@ -210,7 +271,7 @@ export default function JobDetailPage() {
                           </span>
                         </div>
                         <span className={'text-[13px] font-mono ' + labelColor}>
-                          {state === 'pending' ? '—' : pct + '%'}
+                          {state === 'pending' ? '\u2014' : pct + '%'}
                         </span>
                       </div>
                       <div className="h-1.5 bg-surface rounded-full overflow-hidden">
@@ -264,7 +325,7 @@ export default function JobDetailPage() {
 
           {isFailed && (
             <div className="mt-4 px-4 py-3.5 bg-red-500/[0.08] border border-red-500/20 rounded-xl text-red-400 text-[13px]">
-              {job.error || 'Job failed — check service logs for details'}
+              {job.error || 'Job failed \u2014 check service logs for details'}
             </div>
           )}
 
